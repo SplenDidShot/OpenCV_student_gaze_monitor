@@ -468,11 +468,12 @@ int main(int argc, char** argv)
         putText(frame, label, Point(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
 
         ShoppingInfo info = getCurrentInfo();
-        label = format("Shoppers: %d, Neutral: %d, Happy: %d, Sad: %d, Surprised: %d, Anger: %d, Unknown: %d",
+        label = format("Shoppers: %d, Neutral(White): %d, Happy(Yellow): %d, Sad(Purple): %d, Surprised(Orange): %d, Anger(Red): %d, Unknown(Gray): %d",
                         info.shoppers, info.sent[Neutral], info.sent[Happy], info.sent[Sad],
                         info.sent[Surprised], info.sent[Anger], info.sent[Unknown]);
         putText(frame, label, Point(0, 40), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
 
+        putText(frame, "press ESC to terminate program", Point(0, 65), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
         //Neutral: white box, Happy: yellow box, Sad: purple box, Surprised: orange box, Anger: red box, Unknown: gray box
         for(auto const& r: info.faces) {
             int key = r.x+r.y+r.width*r.height;
@@ -499,7 +500,8 @@ int main(int argc, char** argv)
             }
         }
 
-        imshow("Shopper Mood Monitor", frame);
+        imshow("Student Reaction Monitor", frame);
+        resizeWindow("Student Reaction Monitor", 1920, 1080);
 
         if (waitKey(delay) == 27 || sig_caught) {
             cout << "Attempting to stop background threads" << endl;
