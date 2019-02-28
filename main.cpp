@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <thread>
 #include <queue>
+#include <map>
+#include <atomic>
+#include <csignal>
 #include <mutex>
 #include <syslog.h>
 
@@ -39,51 +42,85 @@
 // MQTT
 #include "mqtt.h"
 
+//CV colors are in BGR lol
+#define White Scalar(255,255,255)
+#define Red Scalar(0,0,229)
+#define Purple Scalar(128,0,128)
+#define Yellow Scalar(0,255,255)
+#define Orange Scalar(0,140,255)
+#define Gray Scalar(105,105,105)
+
+
 using namespace std;
 using namespace cv;
 using namespace dnn;
 
 // OpenCV-related variables
-Mat frame, blob, poseBlob;
+Mat frame, blob, sentBlob;
 VideoCapture cap;
 int delay = 5;
-Net net, posenet;
-bool poseChecked = false;
+Net net, sentnet;
+bool sentChecked = false;
+
 // application parameters
 String model;
 String config;
-String posemodel;
-String poseconfig;
+String sentmodel;
+String sentconfig;
 int backendId;
 int targetId;
 int rate;
+float confidenceFace;
+float confidenceMood;
+
+// flag to control background threads
+atomic<bool> keepRunning(true);
+
+// flag to handle UNIX signals
+static volatile sig_atomic_t sig_caught = 0;
+
+// mqtt parameters
+const string topic = "retail/traffic";
+
+// Sentiment contains different kinds of emotions
+enum Sentiment {
+        Neutral,
+        Happy,
+        Sad,
+        Surprised,
+        Anger,
+        Unknown
+};
 
 // ShoppingInfo contains statistics for the shopping information tracked by this application.
 struct ShoppingInfo
 {
     int shoppers;
-    int lookers;
-    std::vector<Rect> faces;
-    std::map<int, bool> lookMap;
+    //sentiment count
+    map<Sentiment, int> sent;
+    //sentiment box
+    map<int, Sentiment> sentMap;
+    vector<Rect> faces;
 };
 
 // currentInfo contains the latest ShoppingInfo tracked by the application.
 ShoppingInfo currentInfo;
 
-
-std::queue<Mat> nextImage;
+queue<Mat> nextImage;
 String currentPerf;
 
-std::mutex m, m1, m2;
+mutex m, m1, m2;
 
 const char* keys =
-    "{ help  h     | | Print help message. }"
-    "{ device d    | 0 | camera device number. }"
-    "{ input i     | | Path to input image or video file. Skip this argument to capture frames from a camera.}"
-    "{ model m     | | Path to .bin file of model containing face recognizer. }"
-    "{ config c    | | Path to .xml file of model containing network configuration. }"
-    "{ posemodel pm     | | Path to .bin file of face pose model. }"
-    "{ poseconfig pc    | | Path to a .xml file of face pose model containing network configuration. }"
+    "{ help  h      | | Print help message. }"
+    "{ device d     | 0 | camera device number. }"
+    "{ input i      | | Path to input image or video file. Skip this argument to capture frames from a camera.}"
+    "{ model m      | | Path to .bin file of model containing face recognizer. }"
+    "{ config c     | | Path to .xml file of model containing network configuration. }"
+    "{ faceconf fc  | 0.5 | Confidence factor for face detection required. }"
+    "{ moodconf mc  | 0.5 | Confidence factor for emotion detection required. }"
+    "{ sentmodel sm     | | Path to .bin file of sentiment model. }"
+    "{ sentconfig sc    | | Path to a .xml file of sentiment model containing network configuration. }"
     "{ backend b    | 0 | Choose one of computation backends: "
                         "0: automatically (by default), "
                         "1: Halide language (http://halide-lang.org/), "
@@ -94,7 +131,7 @@ const char* keys =
                         "1: OpenCL, "
                         "2: OpenCL fp16 (half-float precision), "
                         "3: VPU }"
-    "{ rate r      | 1 | number of seconds between data updates to MQTT server. }";                        
+    "{ rate r      | 1 | number of seconds between data updates to MQTT server. }";
 
 
 // nextImageAvailable returns the next image from the queue in a thread-safe way
@@ -131,14 +168,18 @@ ShoppingInfo getCurrentInfo() {
 // during the current time period.
 void updateInfo(ShoppingInfo info) {
     m2.lock();
-    if (currentInfo.shoppers != info.shoppers) {
+    if (currentInfo.shoppers < info.shoppers) {
         currentInfo.shoppers = info.shoppers;
         currentInfo.faces = info.faces;
     }
 
-    if (currentInfo.lookers != info.lookers) {
-        currentInfo.lookers = info.lookers;
-        currentInfo.lookMap = info.lookMap;
+    for (pair<Sentiment, int> element : info.sent) {
+        Sentiment s = element.first;
+        int count = element.second;
+        if (currentInfo.sent[s] < info.sent[s]) {
+                currentInfo.sent[s] = info.sent[s];
+                currentInfo.sentMap = info.sentMap;
+            }
     }
     m2.unlock();
 }
@@ -147,9 +188,12 @@ void updateInfo(ShoppingInfo info) {
 void resetInfo() {
     m2.lock();
     currentInfo.shoppers = 0;
-    currentInfo.lookers = 0;
     currentInfo.faces.clear();
-    currentInfo.lookMap.clear();
+    currentInfo.sentMap.clear();
+    for (pair<Sentiment, int> element : currentInfo.sent) {
+        Sentiment s = element.first;
+        currentInfo.sent[s] = 0;   
+    }
     m2.unlock();
 }
 
@@ -166,26 +210,31 @@ string getCurrentPerf() {
 void savePerformanceInfo() {
     m1.lock();
 
-    std::vector<double> faceTimes, poseTimes;
+    vector<double> faceTimes, sentTimes;
     double freq = getTickFrequency() / 1000;
     double t = net.getPerfProfile(faceTimes) / freq;
     double t2;
-    if (poseChecked) {
-        t2 = posenet.getPerfProfile(poseTimes) / freq;
+    if (sentChecked) {
+        t2 = sentnet.getPerfProfile(sentTimes) / freq;
     }
-    std::string label = format("Face inference time: %.2f ms, Pose inference time: %.2f ms", t, t2);
+    string label = format("Face inference time: %.2f ms, Sentiment inference time: %.2f ms", t, t2);
 
     currentPerf = label;
+
     m1.unlock();
 }
 
 // publish MQTT message with a JSON payload
 void publishMQTTMessage(const string& topic, const ShoppingInfo& info)
 {
-    std::ostringstream s;
+    ostringstream s;
     s << "{\"shoppers\": \"" << info.shoppers << "\",";
-    s << "\"lookers\": \"" << info.lookers << "\"}";
-    std::string payload = s.str();
+    s << "\"neutral\": \"" << info.sent.at(Neutral) << "\"";
+    s << "\"happy\": \"" << info.sent.at(Happy) << "\"";
+    s << "\"sad\": \"" << info.sent.at(Sad) << "\"";
+    s << "\"surprised\": \"" << info.sent.at(Surprised) << "\"";
+    s << "\"anger\": \"" << info.sent.at(Anger) << "\"}";
+    string payload = s.str();
 
     mqtt_publish(topic, payload);
 
@@ -206,7 +255,7 @@ int handleMQTTControlMessages(void *context, char *topicName, int topicLen, MQTT
 
 // Function called by worker thread to process the next available video frame.
 void frameRunner() {
-    for (;;) {
+    while (keepRunning.load()) {
         Mat next = nextImageAvailable();
         if (!next.empty()) {
             // convert to 4d vector as required by model, and set as input
@@ -215,15 +264,13 @@ void frameRunner() {
             Mat prob = net.forward();
 
             // get faces
-            std::vector<float> confidences;
-            std::vector<Rect> faces;
-            std::map<int, bool> tempMap;
-            int looking = 0;
+            vector<Rect> faces;
+            map<int, Sentiment> tempMap; 
             float* data = (float*)prob.data;
             for (size_t i = 0; i < prob.total(); i += 7)
             {
                 float confidence = data[i + 2];
-                if (confidence >= 0.35)
+                if (confidence > confidenceFace)
                 {
                     int left = (int)(data[i + 3] * frame.cols);
                     int top = (int)(data[i + 4] * frame.rows);
@@ -233,55 +280,98 @@ void frameRunner() {
                     int height = bottom - top + 1;
 
                     faces.push_back(Rect(left, top, width, height));
-                    confidences.push_back(confidence);
                 }
-            }            
+            }
 
-            // look for poses
+            //int detSentiment;
+            map<Sentiment, int> sent = {
+                    {Neutral, 0},
+                    {Happy, 0},
+                    {Sad, 0},
+                    {Surprised, 0},
+                    {Anger, 0},
+                    {Unknown, 0}
+            };
+            // detect sentiment
             for(auto const& r: faces) {
                 // make sure the face rect is completely inside the main Mat
                 if ((r & Rect(0, 0, next.cols, next.rows)) != r) {
                     continue;
                 }
 
-                std::vector<Mat> outs;
-                std::vector<String> names{"angle_y_fc", "angle_p_fc", "angle_r_fc"};
-                cv::Mat face = next(r);
-                // convert to 4d vector, and process thru neural network
-                blobFromImage(face, poseBlob, 1.0, Size(60, 60));
-                posenet.setInput(poseBlob);
-                posenet.forward(outs, names);
-                poseChecked = true;
-                int key = r.x+r.y+r.width+r.height;
-                tempMap[key] = false;
-                // the shopper is looking if their head is tilted within a 40 degree angle relative to the shelf
-                if ( (outs[0].at<float>(0) > -25) && (outs[0].at<float>(0) < 25) &&
-                     (outs[1].at<float>(0) > -25) && (outs[1].at<float>(0) < 25)) {
-                    tempMap[key] = true;
-                    looking++;                  
+                // Read detected face
+                Mat face = next(r);
+
+                // convert to 4d vector, and propagate through sentiment Neural Network
+                blobFromImage(face, sentBlob, 1.0, Size(64, 64));
+                sentnet.setInput(sentBlob);
+                Mat prob = sentnet.forward();
+                sentChecked = true;
+
+                // flatten the result from [1, 5, 1, 1] to [1, 5]
+                Mat flat = prob.reshape(1, 5);
+                // Find the max in returned list of sentiments
+                Point maxLoc;
+                double confidence;
+                minMaxLoc(flat, 0, &confidence, 0, &maxLoc);
+                Sentiment s;
+                int boxCoords = r.x+r.y+r.width*r.height;
+                if (confidence > static_cast<double>(confidenceMood)) {
+                    s = static_cast<Sentiment>(maxLoc.y);
+                } else {
+                    s = Unknown;
                 }
-                
+                tempMap[boxCoords] = s;
+                sent[s] = sent.at(s) + 1;
             }
-           
+
             // retail data
             ShoppingInfo info;
-            info.shoppers = faces.size();
-            info.lookers = looking;
             info.faces = faces;
-            info.lookMap = tempMap;
+            info.shoppers = faces.size();
+            info.sent = sent;
+            info.sentMap = tempMap;
             updateInfo(info);
 
             savePerformanceInfo();
         }
     }
+
+    cout << "Video processing thread stopped" << endl;
+}
+
+// publishInfo publishes current shoppingInfo to MQTT topic queue and then resets it
+void publishAndResetCurrentInfo()
+{
+    m2.lock();
+    ShoppingInfo rtn = currentInfo;
+    publishMQTTMessage(topic, rtn);
+    currentInfo.shoppers = 0;
+    for (pair<Sentiment, int> element : currentInfo.sent) {
+    Sentiment s = element.first;
+        currentInfo.sent[s] = 0;
+        currentInfo.sentMap.clear();
+    }
+    m2.unlock();
 }
 
 // Function called by worker thread to handle MQTT updates. Pauses for rate second(s) between updates.
 void messageRunner() {
-    for (;;) {
-        publishMQTTMessage("retail/traffic", getCurrentInfo());
-        resetInfo();
-        std::this_thread::sleep_for(std::chrono::seconds(rate));
+    while (keepRunning.load()) {
+        publishAndResetCurrentInfo();
+        this_thread::sleep_for(chrono::seconds(rate));
+    }
+
+    cout << "MQTT sender thread stopped" << endl;
+}
+
+// signal handler for the main thread
+void handle_sigterm(int signum)
+{
+    /* we only handle SIGTERM and SIGKILL here */
+    if (signum == SIGTERM) {
+        cout << "Interrupt signal (" << signum << ") received" << endl;
+        sig_caught = 1;
     }
 }
 
@@ -301,9 +391,11 @@ int main(int argc, char** argv)
     backendId = parser.get<int>("backend");
     targetId = parser.get<int>("target");
     rate = parser.get<int>("rate");
+    confidenceFace = parser.get<float>("faceconf");
+    confidenceMood = parser.get<float>("moodconf");
 
-    posemodel = parser.get<String>("posemodel");
-    poseconfig = parser.get<String>("poseconfig");
+    sentmodel = parser.get<String>("sentmodel");
+    sentconfig = parser.get<String>("sentconfig");
 
     // connect MQTT messaging
     int result = mqtt_start(handleMQTTControlMessages);
@@ -321,9 +413,9 @@ int main(int argc, char** argv)
     net.setPreferableTarget(targetId);
 
     // open pose model
-    posenet = readNet(posemodel, poseconfig);
-    posenet.setPreferableBackend(backendId);
-    posenet.setPreferableTarget(targetId);
+    sentnet = readNet(sentmodel, sentconfig);
+    sentnet.setPreferableBackend(backendId);
+    sentnet.setPreferableTarget(targetId);
 
     // open video capture source
     if (parser.has("input")) {
@@ -336,24 +428,36 @@ int main(int argc, char** argv)
     else
         cap.open(parser.get<int>("device"));
 
-
     if (!cap.isOpened()) {
         cerr << "ERROR! Unable to open video source\n";
         return -1;
     }
 
-    // cap.set(cv::CV_CAP_PROP_FRAME_WIDTH,1600);
-    // cap.set(cv::CV_CAP_PROP_FRAME_HEIGHT,900);
+    // initialize shopping info
+    currentInfo.shoppers = 0;
+    currentInfo.sent = {
+            {Neutral, 0},
+            {Happy, 0},
+            {Sad, 0},
+            {Surprised, 0},
+            {Anger, 0},
+            {Unknown, 0}
+    };
+    currentInfo.sentMap.clear();
+    currentInfo.faces.clear();
+    // register signal handler
+    signal(SIGTERM, handle_sigterm);
 
     // start worker threads
-    std::thread t1(frameRunner);
-    std::thread t2(messageRunner);
+    thread t1(frameRunner);
+    thread t2(messageRunner);
 
     // read video input data
     for (;;) {
         cap.read(frame);
 
         if (frame.empty()) {
+            keepRunning = false;
             cerr << "ERROR! blank frame grabbed\n";
             break;
         }
@@ -364,28 +468,49 @@ int main(int argc, char** argv)
         putText(frame, label, Point(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
 
         ShoppingInfo info = getCurrentInfo();
-        label = format("Shoppers: %d, lookers: %d", info.shoppers, info.lookers);
+        label = format("Shoppers: %d, Neutral: %d, Happy: %d, Sad: %d, Surprised: %d, Anger: %d, Unknown: %d",
+                        info.shoppers, info.sent[Neutral], info.sent[Happy], info.sent[Sad],
+                        info.sent[Surprised], info.sent[Anger], info.sent[Unknown]);
         putText(frame, label, Point(0, 40), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
 
-        //If looking, bound face by white box, else red box
+        //Neutral: white box, Happy: yellow box, Sad: purple box, Surprised: orange box, Anger: red box, Unknown: gray box
         for(auto const& r: info.faces) {
-            int key = r.x+r.y+r.width+r.height;
-            if(info.lookMap[key] == true)
-                rectangle(frame, r, Scalar(255,255,255), 2);
-            else
-                rectangle(frame, r, Scalar(0,0,229), 2);
+            int key = r.x+r.y+r.width*r.height;
+            switch(info.sentMap[key])
+            {
+                case Neutral:
+                    rectangle(frame, r, White, 2);
+                    break;
+                case Happy:
+                    rectangle(frame, r, Yellow, 2);
+                    break;
+                case Sad:
+                    rectangle(frame, r, Purple, 2);
+                    break;
+                case Surprised:
+                    rectangle(frame, r, Orange, 2);
+                    break;
+                case Anger:
+                    rectangle(frame, r, Red, 2);
+                    break;
+                case Unknown:
+                    rectangle(frame, r, Gray, 2);
+                    break;
+            }
         }
 
-        imshow("Shopper Gaze Monitor", frame);
+        imshow("Shopper Mood Monitor", frame);
 
-        if (waitKey(delay) >= 0) {
-            // TODO: signal threads to exit
+        if (waitKey(delay) == 27 || sig_caught) {
+            cout << "Attempting to stop background threads" << endl;
+            keepRunning = false;
             break;
         }
     }
 
-    // TODO: wait for worker threads to exit
-    //t1.join();
+    // wait for the threads to finish
+    t1.join();
+    t2.join();
 
     // disconnect MQTT messaging
     mqtt_disconnect();
