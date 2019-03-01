@@ -500,8 +500,9 @@ int main(int argc, char** argv)
             }
         }
 
-        imshow("Student Reaction Monitor", frame);
+        namedWindow("Student Reaction Monitor", WINDOW_NORMAL);
         resizeWindow("Student Reaction Monitor", 1920, 1080);
+        imshow("Student Reaction Monitor", frame);
 
         if (waitKey(delay) == 27 || sig_caught) {
             cout << "Attempting to stop background threads" << endl;
