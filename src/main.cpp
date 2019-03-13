@@ -164,14 +164,12 @@ ShoppingInfo getCurrentInfo() {
     return rtn;
 }
 
-// updateInfo uppdates the current ShoppingInfo for the application to the highest values
+// updateInfo updates the current ShoppingInfo for the application to the highest values
 // during the current time period.
 void updateInfo(ShoppingInfo info) {
     m2.lock();
-    if (currentInfo.shoppers < info.shoppers) {
-        currentInfo.shoppers = info.shoppers;
-        currentInfo.faces = info.faces;
-    }
+    currentInfo.shoppers = info.shoppers;
+    currentInfo.faces = info.faces;
 
     for (pair<Sentiment, int> element : info.sent) {
         Sentiment s = element.first;
