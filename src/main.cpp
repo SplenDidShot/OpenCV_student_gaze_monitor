@@ -117,7 +117,7 @@ const char* keys =
     "{ input i      | | Path to input image or video file. Skip this argument to capture frames from a camera.}"
     "{ model m      | | Path to .bin file of model containing face recognizer. }"
     "{ config c     | | Path to .xml file of model containing network configuration. }"
-    "{ faceconf fc  | 0.5 | Confidence factor for face detection required. }"
+    "{ faceconf fc  | 0.4 | Confidence factor for face detection required. }"
     "{ moodconf mc  | 0.5 | Confidence factor for emotion detection required. }"
     "{ sentmodel sm     | | Path to .bin file of sentiment model. }"
     "{ sentconfig sc    | | Path to a .xml file of sentiment model containing network configuration. }"
@@ -168,13 +168,15 @@ ShoppingInfo getCurrentInfo() {
 // during the current time period.
 void updateInfo(ShoppingInfo info) {
     m2.lock();
-    currentInfo.shoppers = info.shoppers;
-    currentInfo.faces = info.faces;
+    if(currentInfo.shoppers != info.shoppers) {
+        currentInfo.shoppers = info.shoppers;
+        currentInfo.faces = info.faces;
+    }
 
     for (pair<Sentiment, int> element : info.sent) {
         Sentiment s = element.first;
         int count = element.second;
-        if (currentInfo.sent[s] < info.sent[s]) {
+        if (currentInfo.sent[s] != info.sent[s]) {
                 currentInfo.sent[s] = info.sent[s];
                 currentInfo.sentMap = info.sentMap;
             }
