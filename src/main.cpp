@@ -50,6 +50,11 @@
 #define Orange Scalar(0,140,255)
 #define Gray Scalar(105,105,105)
 
+// Multiplier for bounding box of expected face for next frame.
+// Faces within this area will require less confidence to recognize.
+// A multiplier of 0.25 means the current face can move 25%
+// in any direction and still stay within the area.
+#define StickyBoxMultiplier 0.25
 
 using namespace std;
 using namespace cv;
@@ -255,6 +260,9 @@ int handleMQTTControlMessages(void *context, char *topicName, int topicLen, MQTT
 
 // Function called by worker thread to process the next available video frame.
 void frameRunner() {
+    // Stores the areas requiring less confidence to detect a face
+    vector<Rect> stickyBoxes;
+
     while (keepRunning.load()) {
         Mat next = nextImageAvailable();
         if (!next.empty()) {
@@ -281,6 +289,20 @@ void frameRunner() {
 
                     faces.push_back(Rect(left, top, width, height));
                 }
+            }
+
+            // save sticky boxes for next frame
+            stickyBoxes.clear();
+            for (Rect r : faces) {
+                int left = (int)(r.x - StickyBoxMultiplier * r.width);
+                int top = (int)(r.y - StickyBoxMultiplier * r.height);
+                int width = (int)(2 * StickyBoxMultiplier * r.width);
+                int height = (int)(2 * StickyBoxMultiplier * r.height);
+                Rect box (left, top, width, height);
+                
+                // ensure box stays within frame
+                Rect clipped_box = box & Rect(0, 0, next.cols, next.rows);
+                stickyBoxes.push_back(clipped_box);
             }
 
             //int detSentiment;
