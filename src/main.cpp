@@ -55,6 +55,7 @@
 // A multiplier of 0.25 means the current face can move 25%
 // in any direction and still stay within the area.
 #define StickyBoxMultiplier 0.25
+#define StickyConfidence 0.1
 
 using namespace std;
 using namespace cv;
@@ -277,23 +278,36 @@ void frameRunner() {
             float* data = (float*)prob.data;
             for (size_t i = 0; i < prob.total(); i += 7)
             {
+                int left = (int)(data[i + 3] * frame.cols);
+                int top = (int)(data[i + 4] * frame.rows);
+                int right = (int)(data[i + 5] * frame.cols);
+                int bottom = (int)(data[i + 6] * frame.rows);
+                int width = right - left + 1;
+                int height = bottom - top + 1;
+                Rect potentialFace (left, top, width, height);
+
                 float confidence = data[i + 2];
                 if (confidence > confidenceFace)
                 {
-                    int left = (int)(data[i + 3] * frame.cols);
-                    int top = (int)(data[i + 4] * frame.rows);
-                    int right = (int)(data[i + 5] * frame.cols);
-                    int bottom = (int)(data[i + 6] * frame.rows);
-                    int width = right - left + 1;
-                    int height = bottom - top + 1;
-
-                    faces.push_back(Rect(left, top, width, height));
+                    faces.push_back(potentialFace);
+                }
+                else if (confidence > StickyConfidence)
+                {
+                    // Check if potential face lies within a sticky box
+                    for (Rect box : stickyBoxes) {
+                        // If potentialFace within box
+                        if ((potentialFace & box) == potentialFace) {
+                            faces.push_back(potentialFace);
+                            break;
+                        }
+                    }
                 }
             }
 
             // save sticky boxes for next frame
             stickyBoxes.clear();
-            for (Rect r : faces) {
+            for (Rect r : faces)
+            {
                 int left = (int)(r.x - StickyBoxMultiplier * r.width);
                 int top = (int)(r.y - StickyBoxMultiplier * r.height);
                 int width = (int)(2 * StickyBoxMultiplier * r.width);
