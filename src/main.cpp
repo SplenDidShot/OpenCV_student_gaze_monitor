@@ -55,7 +55,7 @@
 // A multiplier of 0.25 means the current face can move 25%
 // in any direction and still stay within the area.
 #define StickyBoxMultiplier 0.25
-#define StickyConfidence 0.1
+#define StickyConfidence 0.05
 
 using namespace std;
 using namespace cv;
@@ -310,8 +310,9 @@ void frameRunner() {
             {
                 int left = (int)(r.x - StickyBoxMultiplier * r.width);
                 int top = (int)(r.y - StickyBoxMultiplier * r.height);
-                int width = (int)(2 * StickyBoxMultiplier * r.width);
-                int height = (int)(2 * StickyBoxMultiplier * r.height);
+                double sideMultiplier = 1 + 2 * StickyBoxMultiplier;
+                int width = (int)(sideMultiplier * r.width);
+                int height = (int)(sideMultiplier * r.height);
                 Rect box (left, top, width, height);
                 
                 // ensure box stays within frame
