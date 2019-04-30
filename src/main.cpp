@@ -55,7 +55,7 @@
 // A multiplier of 0.25 means the current face can move 25%
 // in any direction and still stay within the area.
 #define StickyBoxMultiplier 0.25
-#define StickyConfidence 0.05
+#define StickyConfidence 0.2
 
 using namespace std;
 using namespace cv;
