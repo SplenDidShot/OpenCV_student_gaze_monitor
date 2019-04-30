@@ -235,10 +235,10 @@ void publishMQTTMessage(const string& topic, const ShoppingInfo& info)
 {
     ostringstream s;
     s << "{\"shoppers\": \"" << info.shoppers << "\",";
-    s << "\"neutral\": \"" << info.sent.at(Neutral) << "\"";
-    s << "\"happy\": \"" << info.sent.at(Happy) << "\"";
-    s << "\"sad\": \"" << info.sent.at(Sad) << "\"";
-    s << "\"surprised\": \"" << info.sent.at(Surprised) << "\"";
+    s << "\"neutral\": \"" << info.sent.at(Neutral) << "\",";
+    s << "\"happy\": \"" << info.sent.at(Happy) << "\",";
+    s << "\"sad\": \"" << info.sent.at(Sad) << "\",";
+    s << "\"surprised\": \"" << info.sent.at(Surprised) << "\",";
     s << "\"anger\": \"" << info.sent.at(Anger) << "\"}";
     string payload = s.str();
 
